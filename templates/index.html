@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f7f6f0">
+  <title>Common Table | Food support near you</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+</head>
+<body>
+<header>
+  <a class="brand" href="/"><span class="brand-mark">✣</span>Common Table</a>
+  <nav><a href="#how">How it works</a><a href="{{ url_for('login') }}">Admin</a></nav>
+</header>
+<main>
+  <section class="hero">
+    <div class="eyebrow">Food support near you</div>
+    <h1>Good food should be easy to find.</h1>
+    <p class="intro">Find free groceries and meals nearby, with clear hours and simple next steps.</p>
+    <form class="search" id="searchForm">
+      <span aria-hidden="true">⌖</span>
+      <input id="query" type="search" placeholder="Enter a city, area or food support" aria-label="Search by city, area, or resource">
+      <button class="location-button" id="useLocation" type="button">Use my location</button>
+      <button type="submit">Find food</button>
+    </form>
+    <p class="notice">Listings may be unverified. Please confirm details with providers before travelling.</p>
+  </section>
+
+  <section class="live-section" id="nearby">
+    <div class="head"><div><div class="eyebrow">Live nearby search</div><h2>Food support within 500 m</h2></div><button id="locateLive" type="button">Find near my location</button></div>
+    <p class="muted" id="liveStatus">Allow location access to search nearby food banks, meal kitchens, and food-sharing points.</p>
+    <p class="notice">Nearby listings come from OpenStreetMap and may be incomplete or unverified. Your coordinates are used to search OpenStreetMap; requesting a route also sends them to the public routing service.</p>
+    <div class="live-grid"><div class="live-results" id="liveResults"><div class="empty">Choose “Find near my location” to load nearby places.</div></div><div id="liveMap" role="application" aria-label="Map showing your location, food support places, 500 meter radius, and selected route"></div></div>
+  </section>
+
+  <section id="resources">
+    <div class="head">
+      <div><div class="muted">Food support directory</div><h2 id="heading">Places to explore</h2></div>
+      <div class="filters">
+        <select id="type" aria-label="Filter by resource type">
+          <option value="all">All resources</option><option>Food pantry</option><option>Free meal</option><option>Community support</option>
+        </select>
+        <button id="open" type="button" aria-pressed="false">Open now</button>
+      </div>
+    </div>
+    <div class="count-row"><span class="muted" id="count" aria-live="polite">Loading resources…</span><span class="muted">Hours shown in local time</span></div>
+    <div class="grid">
+      <div class="cards" id="cards" aria-live="polite"></div>
+    </div>
+  </section>
+  <section id="how" class="how"><h2>Simple next steps</h2><p class="muted">Search your area, check opening hours, and contact the provider before travelling.</p></section>
+</main>
+<footer>Common Table · Community food-support directory</footer>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+  const $ = id => document.getElementById(id);
+  let onlyOpen = false;
+  const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  function resourceCard(r) {
+    const address = [r.address, r.city, r.postal_code].filter(Boolean).join(', ');
+    const website = r.website && /^https?:\/\//i.test(r.website)
+      ? `<p><a href="${escapeHtml(r.website)}" target="_blank" rel="noopener noreferrer">Provider website</a></p>` : '';
+    return `<article class="card">
+      <div><span class="status ${r.open_now ? '' : 'closed'}">${r.open_now ? 'OPEN NOW' : 'CLOSED'}</span><span class="muted"> · ${r.verified ? 'Verified' : 'Unverified'}</span></div>
+      <h3>${escapeHtml(r.name)}</h3><div class="muted">${escapeHtml(r.resource_type)}</div>
+      <p class="detail">◷ ${escapeHtml(r.opening_time)}–${escapeHtml(r.closing_time)} · ${escapeHtml(r.open_days.map(d => ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).join(', '))}</p>
+      <p class="detail">⌖ ${escapeHtml(address)}</p>
+      ${r.phone ? `<p class="detail">☎ <a href="tel:${escapeHtml(r.phone)}">${escapeHtml(r.phone)}</a></p>` : ''}
+      ${website}<p class="desc">${escapeHtml(r.description || '')}</p>
+    </article>`;
+  }
+  async function loadResources() {
+    $('count').textContent = 'Loading resources…';
+    const params = new URLSearchParams({q: $('query').value.trim(), type: $('type').value, open_now: onlyOpen ? '1' : '0'});
+    try {
+      const response = await fetch(`/api/resources?${params}`);
+      if (!response.ok) throw new Error('Could not load resources');
+      const data = await response.json();
+      $('count').textContent = `${data.count} ${data.count === 1 ? 'place' : 'places'} found`;
+      $('heading').textContent = $('query').value.trim() ? `Results for ${$('query').value.trim()}` : 'Places to explore';
+      $('cards').innerHTML = data.resources.length ? data.resources.map(resourceCard).join('') : '<div class="empty">No matching resources. Try another search or filter.</div>';
+    } catch (error) {
+      $('count').textContent = 'Resources could not be loaded.';
+      $('cards').innerHTML = '<div class="empty">Please refresh the page and try again.</div>';
+    }
+  }
+  let gpsPoint = null, livePlaces = [], markerLayer = null, routeLayer = null, userMarker = null, radiusCircle = null;
+  const liveMap = window.L ? L.map('liveMap').setView([20.5937,78.9629], 5) : null;
+  if (liveMap) {
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(liveMap);
+    markerLayer = L.layerGroup().addTo(liveMap);
+  }
+  function renderLive() {
+    const query = $('query').value.trim().toLocaleLowerCase();
+    const visible = livePlaces.filter(p => !query || `${p.name} ${p.kind} ${p.address}`.toLocaleLowerCase().includes(query));
+    $('liveResults').replaceChildren();
+    if (!visible.length) {
+      const empty = document.createElement('div'); empty.className='empty';
+      empty.textContent = livePlaces.length ? 'No nearby places match that search.' : 'No mapped food-support places were found within 500 m.';
+      $('liveResults').append(empty);
+    }
+    for (const place of visible) {
+      const card = document.createElement('article'); card.className='card live-card';
+      const title = document.createElement('h3'); title.textContent=place.name; card.append(title);
+      const kind = document.createElement('p'); kind.className='muted'; kind.textContent=`${place.kind} · ${place.distance_m} m away · OpenStreetMap listing`; card.append(kind);
+      if (place.address) { const address=document.createElement('p'); address.className='detail'; address.textContent=`⌖ ${place.address}`; card.append(address); }
+      if (place.opening_hours) { const hours=document.createElement('p'); hours.className='detail'; hours.textContent=`Hours: ${place.opening_hours}`; card.append(hours); }
+      if (place.phone) { const phone=document.createElement('a'); phone.href=`tel:${place.phone}`; phone.textContent=place.phone; card.append(phone); }
+      const route=document.createElement('button'); route.className='route-button'; route.type='button'; route.textContent='Show driving route';
+      route.addEventListener('click', () => showRoute(place)); card.append(route); $('liveResults').append(card);
+    }
+    if (markerLayer) markerLayer.clearLayers();
+    for (const place of visible) {
+      const marker=L.marker([place.lat,place.lon]).bindPopup(`<strong>${escapeHtml(place.name)}</strong><br>${place.distance_m} m away`);
+      marker.on('click', () => showRoute(place)); if (markerLayer) marker.addTo(markerLayer);
+    }
+  }
+  async function findNearby() {
+    if (!liveMap) { $('liveStatus').textContent='The map library did not load. Check your internet connection and refresh the page.'; return; }
+    if (!navigator.geolocation) { $('liveStatus').textContent='This browser does not support location access. Use the curated directory search below.'; return; }
+    $('liveStatus').textContent='Getting your location and searching nearby…';
+    navigator.geolocation.getCurrentPosition(async position => {
+      gpsPoint={lat:position.coords.latitude,lon:position.coords.longitude};
+      liveMap.setView([gpsPoint.lat,gpsPoint.lon],17);
+      if (userMarker) liveMap.removeLayer(userMarker);
+      if (radiusCircle) liveMap.removeLayer(radiusCircle);
+      if (routeLayer) { liveMap.removeLayer(routeLayer); routeLayer=null; }
+      userMarker=L.circleMarker([gpsPoint.lat,gpsPoint.lon],{radius:8,color:'#fff',weight:3,fillColor:'#3469a8',fillOpacity:1}).addTo(liveMap).bindPopup('Your location');
+      radiusCircle=L.circle([gpsPoint.lat,gpsPoint.lon],{radius:500,color:'#bd786b',weight:2,fillColor:'#bd786b',fillOpacity:.08}).addTo(liveMap);
+      try {
+        const response=await fetch(`/api/nearby-food?lat=${encodeURIComponent(gpsPoint.lat)}&lon=${encodeURIComponent(gpsPoint.lon)}`);
+        const data=await response.json(); if (!response.ok) throw new Error(data.error || 'Nearby search failed.');
+        livePlaces=data.places;
+        $('liveStatus').textContent=`${data.count} mapped food-support ${data.count===1?'place':'places'} found within 500 m. Straight-line radius; select a result or marker for a route.`;
+        renderLive();
+      } catch (error) { $('liveStatus').textContent=error.message || 'Nearby search is temporarily unavailable.'; }
+      setTimeout(() => liveMap.invalidateSize(), 100);
+    }, error => {
+      $('liveStatus').textContent=error.code===1 ? 'Location permission was denied. Allow location access in your browser to search within 500 m.' : 'Could not read your location. Check device location settings and try again.';
+    }, {enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+  }
+  async function showRoute(place) {
+    if (!gpsPoint || !liveMap) return;
+    $('liveStatus').textContent=`Finding a driving route to ${place.name}…`;
+    try {
+      const params=new URLSearchParams({from_lat:gpsPoint.lat,from_lon:gpsPoint.lon,to_lat:place.lat,to_lon:place.lon});
+      const response=await fetch(`/api/route?${params}`); const data=await response.json();
+      if (!response.ok) throw new Error(data.error || 'Route unavailable.');
+      if (routeLayer) liveMap.removeLayer(routeLayer);
+      routeLayer=L.geoJSON(data.geometry,{style:{color:'#3469a8',weight:5,opacity:.85}}).addTo(liveMap);
+      liveMap.fitBounds(routeLayer.getBounds().pad(.2));
+      $('liveStatus').textContent=`Driving route: ${(data.distance_m/1000).toFixed(1)} km, about ${Math.max(1,Math.round(data.duration_s/60))} min. Route distance can exceed the 500 m straight-line search radius.`;
+    } catch (error) { $('liveStatus').textContent=error.message || 'Route service is temporarily unavailable.'; }
+  }
+  $('locateLive').addEventListener('click',findNearby);
+  $('useLocation').addEventListener('click',findNearby);
+  $('searchForm').addEventListener('submit', event => { event.preventDefault(); loadResources(); renderLive(); });
+  $('type').addEventListener('change', loadResources);
+  $('open').addEventListener('click', () => {
+    onlyOpen = !onlyOpen; $('open').classList.toggle('active', onlyOpen);
+    $('open').setAttribute('aria-pressed', String(onlyOpen)); loadResources();
+  });
+  $('useLocation').addEventListener('click', () => {
+    if (!navigator.geolocation) { alert('Location is not supported by this browser. Enter your city or area instead.'); return; }
+    navigator.geolocation.getCurrentPosition(() => {
+      alert('Location access is available, but this demo has no geocoder or distance matching yet. Search by city or area instead.');
+    }, () => alert('Location permission was not granted. You can type your city or area instead.'));
+  });
+  loadResources();
+</script>
+</body>
+</html>
